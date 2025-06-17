@@ -5,17 +5,15 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 let container, stats, clock, gui, mixer, actions, activeAction, previousAction;
-let camera, scene, renderer, model, face, terrain, controls;
+let camera, scene, renderer, model, face, controls;
+let terrainTiles = [], baseTile;
+let tileSize = 20, scaleFactor = 5;
+const tileRepeat = 3;
 
 const api = { state: 'Walking' };
 const keys = { w: false, a: false, s: false, d: false, shift: false };
 const moveSpeed = 0.1;
 let currentMovement = 'Idle';
-
-// Terrain parameters
-const TERRAIN_SIZE = 100;
-const TERRAIN_SEGMENTS = 100;
-const TERRAIN_HEIGHT = 5;
 
 init();
 
@@ -29,7 +27,6 @@ function init() {
 
 	scene = new THREE.Scene();
 	scene.background = new THREE.Color(0xe0e0e0);
-	scene.fog = new THREE.Fog(0xe0e0e0, 20, 100);
 	clock = new THREE.Clock();
 
 	const hemiLight = new THREE.HemisphereLight(0xffffff, 0x8d8d8d, 3);
@@ -38,8 +35,6 @@ function init() {
 	const dirLight = new THREE.DirectionalLight(0xffffff, 3);
 	dirLight.position.set(0, 20, 10);
 	scene.add(dirLight);
-
-	createTerrain();
 
 	renderer = new THREE.WebGLRenderer({ antialias: true });
 	renderer.setPixelRatio(window.devicePixelRatio);
@@ -51,14 +46,31 @@ function init() {
 	controls.enableDamping = true;
 	controls.target.set(0, 2, 0);
 
-	const loader = new GLTFLoader();
-	loader.load('RobotExpressive.glb', function (gltf) {
+	// Load terrain base tile
+	new GLTFLoader().load('UnevenTerrain.glb', function (gltf) {
+		baseTile = gltf.scene;
+		baseTile.scale.set(scaleFactor, scaleFactor, scaleFactor);
+		createTerrainGrid();
+	}, undefined, console.error);
+
+	// Load robot model
+	new GLTFLoader().load('RobotExpressive.glb', function (gltf) {
 		model = gltf.scene;
 		scene.add(model);
 		createGUI(model, gltf.animations);
-	}, undefined, function (e) {
-		console.error(e);
-	});
+
+		// Position robot above terrain after delay to allow tiles to load
+		setTimeout(() => {
+			const spawnPos = new THREE.Vector3(0, 20, 0);
+			const raycaster = new THREE.Raycaster(spawnPos, new THREE.Vector3(0, -1, 0));
+			const hits = terrainTiles.flatMap(tile => raycaster.intersectObject(tile, true));
+			if (hits.length > 0) {
+				model.position.copy(hits[0].point);
+			} else {
+				model.position.set(0, 0, 0);
+			}
+		}, 500);
+	}, undefined, console.error);
 
 	window.addEventListener('resize', onWindowResize);
 	document.addEventListener('keydown', onKeyDown);
@@ -68,54 +80,41 @@ function init() {
 	container.appendChild(stats.dom);
 }
 
-function createTerrain() {
-	// Create terrain geometry
-	const geometry = new THREE.PlaneGeometry(
-		TERRAIN_SIZE,
-		TERRAIN_SIZE,
-		TERRAIN_SEGMENTS,
-		TERRAIN_SEGMENTS
-	);
-	geometry.rotateX(-Math.PI / 2);
+function createTerrainGrid() {
+	const half = Math.floor(tileRepeat / 2);
+	const tileSpacing = tileSize * scaleFactor * 0.99; // Slight overlap to hide seams
 
-	// Generate height map
-	const vertices = geometry.attributes.position.array;
-	for (let i = 0; i < vertices.length; i += 3) {
-		const x = vertices[i];
-		const z = vertices[i + 2];
-		// Create interesting terrain using multiple sine waves
-		vertices[i + 1] = Math.sin(x * 0.1) * Math.cos(z * 0.1) * TERRAIN_HEIGHT +
-			Math.sin(x * 0.2 + z * 0.2) * TERRAIN_HEIGHT * 0.5;
+	for (let i = -half; i <= half; i++) {
+		for (let j = -half; j <= half; j++) {
+			const tile = baseTile.clone(true);
+			tile.position.set(i * tileSpacing, 0, j * tileSpacing);
+			scene.add(tile);
+			terrainTiles.push(tile);
+		}
 	}
-
-	geometry.computeVertexNormals();
-
-	// Create terrain mesh
-	const material = new THREE.MeshPhongMaterial({
-		color: 0x3d9970,
-		flatShading: true,
-		wireframe: false
-	});
-
-	terrain = new THREE.Mesh(geometry, material);
-	scene.add(terrain);
-
-	// Add grid helper
-	const grid = new THREE.GridHelper(TERRAIN_SIZE, 20, 0x000000, 0x000000);
-	grid.material.opacity = 0.2;
-	grid.material.transparent = true;
-	scene.add(grid);
 }
 
-function getTerrainHeight(x, z) {
-	// Convert world coordinates to terrain coordinates
-	const terrainX = (x + TERRAIN_SIZE / 2) / TERRAIN_SIZE;
-	const terrainZ = (z + TERRAIN_SIZE / 2) / TERRAIN_SIZE;
 
-	// Get the height at the given position using the same height map function
-	return Math.sin(x * 0.1) * Math.cos(z * 0.1) * TERRAIN_HEIGHT +
-		Math.sin(x * 0.2 + z * 0.2) * TERRAIN_HEIGHT * 0.5;
+function repositionTerrain() {
+	const spacing = tileSize * scaleFactor * 0.99;
+	const centerX = Math.round(model.position.x / spacing) * spacing;
+	const centerZ = Math.round(model.position.z / spacing) * spacing;
+
+	let idx = 0;
+	for (let i = -1; i <= 1; i++) {
+		for (let j = -1; j <= 1; j++) {
+			if (terrainTiles[idx]) {
+				terrainTiles[idx].position.set(
+					centerX + i * spacing,
+					0,
+					centerZ + j * spacing
+				);
+				idx++;
+			}
+		}
+	}
 }
+
 
 function createGUI(model, animations) {
 	const states = ['Idle', 'Walking', 'Running', 'Dance', 'Death', 'Sitting', 'Standing'];
@@ -135,8 +134,7 @@ function createGUI(model, animations) {
 	}
 
 	const statesFolder = gui.addFolder('States');
-	const clipCtrl = statesFolder.add(api, 'state').options(states);
-	clipCtrl.onChange(() => {
+	statesFolder.add(api, 'state').options(states).onChange(() => {
 		currentMovement = api.state;
 		fadeToAction(api.state, 0.5);
 	});
@@ -155,9 +153,9 @@ function createGUI(model, animations) {
 	face = model.getObjectByName('Head_4');
 	const expressions = Object.keys(face.morphTargetDictionary);
 	const expressionFolder = gui.addFolder('Expressions');
-	for (let i = 0; i < expressions.length; i++) {
-		expressionFolder.add(face.morphTargetInfluences, i, 0, 1, 0.01).name(expressions[i]);
-	}
+	expressions.forEach((name, i) => {
+		expressionFolder.add(face.morphTargetInfluences, i, 0, 1, 0.01).name(name);
+	});
 	expressionFolder.open();
 
 	activeAction = actions['Walking'];
@@ -166,13 +164,9 @@ function createGUI(model, animations) {
 
 function fadeToAction(name, duration) {
 	if (activeAction === actions[name]) return;
-
 	previousAction = activeAction;
 	activeAction = actions[name];
-
-	if (previousAction !== activeAction) {
-		previousAction.fadeOut(duration);
-	}
+	if (previousAction !== activeAction) previousAction.fadeOut(duration);
 	activeAction.reset().setEffectiveTimeScale(1).setEffectiveWeight(1).fadeIn(duration).play();
 }
 
@@ -210,29 +204,61 @@ function onKeyUp(event) {
 }
 
 function updateRobotMovement() {
-	if (!model) return;
+	if (!model || terrainTiles.length === 0) return;
 
-	const moveDirection = new THREE.Vector3();
-	if (keys.w) moveDirection.z -= 1;
-	if (keys.s) moveDirection.z += 1;
-	if (keys.a) moveDirection.x -= 1;
-	if (keys.d) moveDirection.x += 1;
+	const direction = new THREE.Vector3();
+	const forward = new THREE.Vector3();
+	const right = new THREE.Vector3();
 
-	if (moveDirection.length() > 0) {
-		moveDirection.normalize();
+	// Extract camera basis vectors
+	camera.getWorldDirection(forward); // forward = -Z
+	forward.y = 0;
+	forward.normalize();
+
+	right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+
+	// Compose movement vector from input
+	if (keys.w) direction.add(forward);
+	if (keys.s) direction.sub(forward);
+	if (keys.a) direction.sub(right);
+	if (keys.d) direction.add(right);
+
+	if (direction.length() > 0) {
+		direction.normalize();
 
 		const speed = keys.shift ? moveSpeed * 2 : moveSpeed;
-		const newPos = model.position.clone();
-		newPos.x += moveDirection.x * speed;
-		newPos.z += moveDirection.z * speed;
+		const velocity = direction.clone().multiplyScalar(speed);
+		const newPos = model.position.clone().add(velocity);
 
-		// Update Y position based on terrain height
-		newPos.y = getTerrainHeight(newPos.x, newPos.z);
+		// Raycast for terrain height
+		const raycaster = new THREE.Raycaster(
+			new THREE.Vector3(newPos.x, 20, newPos.z),
+			new THREE.Vector3(0, -1, 0)
+		);
+
+		let intersections = [];
+		for (let tile of terrainTiles) {
+			const hits = raycaster.intersectObject(tile, true);
+			if (hits.length > 0) intersections.push(...hits);
+		}
+
+		if (intersections.length > 0) {
+			intersections.sort((a, b) => a.distance - b.distance);
+			newPos.y = intersections[0].point.y;
+		} else {
+			newPos.y = 0;
+		}
+
 		model.position.copy(newPos);
 
-		const targetRotation = Math.atan2(moveDirection.x, moveDirection.z);
-		model.rotation.y = targetRotation;
+		// Smoothly rotate the model to face movement direction
+		const targetQuaternion = new THREE.Quaternion().setFromUnitVectors(
+			new THREE.Vector3(0, 0, 1), // forward
+			direction.clone().normalize()
+		);
+		model.quaternion.slerp(targetQuaternion, 0.2);
 
+		// Animation state
 		if (keys.shift && currentMovement !== 'Running') {
 			currentMovement = 'Running';
 			fadeToAction('Running', 0.2);
@@ -240,17 +266,60 @@ function updateRobotMovement() {
 			currentMovement = 'Walking';
 			fadeToAction('Walking', 0.2);
 		}
+
+		repositionTerrain();
 	} else if (currentMovement !== 'Idle') {
 		currentMovement = 'Idle';
 		fadeToAction('Idle', 0.2);
 	}
 }
 
+
+function updateThirdPersonCamera() {
+	if (!model) return;
+
+	// Desired camera offset from robot in world space
+	const offset = new THREE.Vector3(0, 5, -10); // Behind and above the robot
+
+	// Convert offset to world space based on robot orientation
+	const cameraTarget = model.position.clone();
+	const cameraOffset = offset.clone().applyQuaternion(model.quaternion);
+	const desiredCameraPos = cameraTarget.clone().add(cameraOffset);
+
+	// Terrain-aware adjustment: raycast below desired camera pos
+	const raycaster = new THREE.Raycaster(
+		new THREE.Vector3(desiredCameraPos.x, desiredCameraPos.y + 10, desiredCameraPos.z),
+		new THREE.Vector3(0, -1, 0)
+	);
+	let intersects = [];
+	for (let tile of terrainTiles) {
+		intersects.push(...raycaster.intersectObject(tile, true));
+	}
+
+	// If terrain below, ensure camera stays just above ground
+	if (intersects.length > 0) {
+		const groundY = intersects[0].point.y;
+		if (desiredCameraPos.y < groundY + 2.5) {
+			desiredCameraPos.y = groundY + 2.5;
+		}
+	}
+
+	// Smooth camera transition
+	camera.position.lerp(desiredCameraPos, 0.1);
+
+	// Always look slightly above robot’s head
+	const lookTarget = model.position.clone().add(new THREE.Vector3(0, 2, 0));
+	camera.lookAt(lookTarget);
+}
+
+
+
 function animate() {
 	const dt = clock.getDelta();
 	if (mixer) mixer.update(dt);
 	updateRobotMovement();
-	controls.update();
+	updateThirdPersonCamera();
 	renderer.render(scene, camera);
 	stats.update();
 }
+
